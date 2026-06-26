@@ -1,6 +1,7 @@
-# ESP32-S3 MPU6050 HAR - WiFi热点版
+# ESP32-S3 MPU6050 + HMC5883L HAR - WiFi热点版
 # ESP32自建热点(ESP32-HAR) → 手机连上 → 浏览器打开192.168.4.1
 # 无需USB数据线
+# v3: 51维特征 + 磁力计 + WiFi稳健初始化
 
 import gc, math, time, network, socket
 from machine import SoftI2C, Pin
@@ -22,12 +23,13 @@ SDA_PIN = 8
 SCL_PIN = 9
 LED_PIN = 48
 MPU_ADDR = 0x68
+MAG_ADDR = 0x1E       # HMC5883L 磁力计
 
 WINDOW_SIZE = 128
 WINDOW_STEP = 64
-SAMPLE_MS = 10
-N_AXES = 6
-N_FEATURES = 34
+SAMPLE_MS = 10          # 100Hz
+N_AXES = 9              # acc×3 + gyro×3 + mag×3
+N_FEATURES = 51         # 30基础 + 4方向感知 + 17磁力计
 SMOOTH_FRAMES = 2
 
 ACT_NAMES = ["sit", "stand", "walk", "upstairs", "downstairs", "run"]
@@ -39,11 +41,14 @@ LED_COLORS = {
 
 np = None
 i2c = None
+has_mag = False  # 磁力计是否可用
+
 
 def init_led():
     global np
     if HAS_LED and np is None:
         np = neopixel.NeoPixel(Pin(LED_PIN), 1)
+
 
 def set_led(r, g, b):
     init_led()
@@ -51,13 +56,17 @@ def set_led(r, g, b):
         np[0] = (r, g, b)
         np.write()
 
+
 def init_i2c():
     global i2c
     if i2c is None:
-        i2c = SoftI2C(sda=Pin(SDA_PIN), scl=Pin(SCL_PIN), freq=400000)
+        i2c = SoftI2C(sda=Pin(SDA_PIN), scl=Pin(SCL_PIN), freq=100000)  # 100kHz兼容磁力计
 
+
+# ===== MPU6050 =====
 def conv(v):
     return v - 65536 if v >= 32768 else v
+
 
 def init_mpu():
     init_i2c()
@@ -69,6 +78,7 @@ def init_mpu():
         except OSError:
             time.sleep_ms(50)
     return False
+
 
 def read_mpu_raw():
     for _ in range(5):
@@ -87,35 +97,111 @@ def read_mpu_raw():
             time.sleep_ms(10)
     return None
 
+
+# ===== HMC5883L 磁力计 =====
+def init_mag():
+    """初始化 HMC5883L 磁力计 (0x1E)"""
+    global has_mag
+    init_i2c()
+    for i in range(5):
+        try:
+            i2c.writeto_mem(MAG_ADDR, 0x00, b'\x70')
+            time.sleep_ms(5)
+            i2c.writeto_mem(MAG_ADDR, 0x02, b'\x00')
+            time.sleep_ms(10)
+            test = i2c.readfrom_mem(MAG_ADDR, 0x03, 6)
+            if len(test) == 6:
+                has_mag = True
+                print("HMC5883L OK (0x1E)")
+                return True
+        except OSError:
+            time.sleep_ms(50)
+    print("HMC5883L not found - mag features will be 0")
+    has_mag = False
+    return False
+
+
+def read_mag_raw():
+    """读取 HMC5883L 磁力计原始数据
+    注意: 寄存器顺序为 X, Z, Y (不是 X, Y, Z!)
+    """
+    for _ in range(3):
+        try:
+            data = i2c.readfrom_mem(MAG_ADDR, 0x03, 6)
+            mx = (data[0] << 8) | data[1]
+            if mx >= 32768:
+                mx -= 65536
+            mz = (data[2] << 8) | data[3]
+            if mz >= 32768:
+                mz -= 65536
+            my = (data[4] << 8) | data[5]
+            if my >= 32768:
+                my -= 65536
+            return mx, my, mz
+        except OSError:
+            time.sleep_ms(5)
+    return None
+
+
+def read_all_raw():
+    """同时读取 MPU6050 + HMC5883L"""
+    mpu = read_mpu_raw()
+    if mpu is None:
+        return None
+    if has_mag:
+        mag = read_mag_raw()
+        if mag is None:
+            return None
+        return mpu + mag
+    else:
+        return mpu + (0, 0, 0)
+
+
+# ===== 9轴校准 =====
 ax_off = ay_off = az_off = gx_off = gy_off = gz_off = 0
+mx_off = my_off = mz_off = 0
+
 
 def calibrate(n=50):
     global ax_off, ay_off, az_off, gx_off, gy_off, gz_off
-    s = [0] * 6
+    global mx_off, my_off, mz_off
+    s = [0] * 9
     v = 0
     t0 = time.ticks_ms()
     while v < n and time.ticks_diff(time.ticks_ms(), t0) < 10000:
-        d = read_mpu_raw()
+        d = read_all_raw()
         if d is None:
             time.sleep_ms(10)
             continue
-        for i in range(6):
+        for i in range(9):
             s[i] += d[i]
         v += 1
         time.sleep_ms(10)
     if v > 0:
-        ax_off, ay_off, az_off, gx_off, gy_off, gz_off = [x // v for x in s]
+        ax_off, ay_off, az_off, gx_off, gy_off, gz_off, mx_off, my_off, mz_off = [x // v for x in s]
+
 
 def get_cal():
-    d = read_mpu_raw()
+    d = read_all_raw()
     if d is None:
         return None
     return (d[0] - ax_off, d[1] - ay_off, d[2] - az_off,
-            d[3] - gx_off, d[4] - gy_off, d[5] - gz_off)
+            d[3] - gx_off, d[4] - gy_off, d[5] - gz_off,
+            d[6] - mx_off, d[7] - my_off, d[8] - mz_off)
 
+
+# ===== 特征提取 v3 — 51维 =====
 def extract_features(buf):
+    """
+    从窗口中提取51维特征:
+      索引 0-29:  6轴 × 5统计量 (mean/std/max/min/ptp) — MPU
+      索引 30-33: 方向感知特征 (acc_mag_mean, acc_mag_std, tilt_angle, gyro_mag_mean)
+      索引 34-48: 磁力计3轴 × 5统计量
+      索引 49-50: 磁场幅值 mean/std
+    """
     feats = array('f', [0.0] * N_FEATURES)
     axis_means = [0.0] * N_AXES
+
     for axis in range(N_AXES):
         s = 0.0
         mn = 1e9
@@ -123,22 +209,32 @@ def extract_features(buf):
         for i in range(WINDOW_SIZE):
             v = buf[i * N_AXES + axis]
             s += v
-            if v < mn: mn = v
-            if v > mx: mx = v
+            if v < mn:
+                mn = v
+            if v > mx:
+                mx = v
         mean = s / WINDOW_SIZE
         axis_means[axis] = mean
         sq = 0.0
         for i in range(WINDOW_SIZE):
             d = buf[i * N_AXES + axis] - mean
             sq += d * d
-        b = axis * 5
+
+        if axis < 6:
+            b = axis * 5
+        else:
+            b = 34 + (axis - 6) * 5
+
         feats[b] = mean
         feats[b + 1] = math.sqrt(sq / WINDOW_SIZE)
         feats[b + 2] = mx
         feats[b + 3] = mn
         feats[b + 4] = mx - mn
 
+    # 方向感知4维 (索引 30-33)
     ax_m, ay_m, az_m = axis_means[0], axis_means[1], axis_means[2]
+    gx_m, gy_m, gz_m = axis_means[3], axis_means[4], axis_means[5]
+
     acc_mag_sum = 0.0
     acc_mag_sq = 0.0
     gyro_mag_sum = 0.0
@@ -149,21 +245,44 @@ def extract_features(buf):
         gxv = buf[i * N_AXES + 3]
         gyv = buf[i * N_AXES + 4]
         gzv = buf[i * N_AXES + 5]
-        m = axv * axv + ayv * ayv + azv * azv
-        acc_mag_sum += math.sqrt(m)
-        acc_mag_sq += m
+        acc_mag_sum += math.sqrt(axv * axv + ayv * ayv + azv * azv)
+        acc_mag_sq += (axv * axv + ayv * ayv + azv * azv)
         gyro_mag_sum += math.sqrt(gxv * gxv + gyv * gyv + gzv * gzv)
 
     acc_mag_mean = acc_mag_sum / WINDOW_SIZE
     acc_mag_var = (acc_mag_sq / WINDOW_SIZE) - (acc_mag_mean * acc_mag_mean)
-    if acc_mag_var < 0: acc_mag_var = 0.0
+    if acc_mag_var < 0:
+        acc_mag_var = 0.0
+
     feats[30] = acc_mag_mean
     feats[31] = math.sqrt(acc_mag_var)
     horiz = math.sqrt(ax_m * ax_m + ay_m * ay_m) + 1e-10
     feats[32] = math.atan2(horiz, abs(az_m))
     feats[33] = gyro_mag_sum / WINDOW_SIZE
+
+    # 磁场幅值统计 (索引 49-50)
+    mag_mag_sum = 0.0
+    mag_mag_sq = 0.0
+    for i in range(WINDOW_SIZE):
+        mxv = buf[i * N_AXES + 6]
+        myv = buf[i * N_AXES + 7]
+        mzv = buf[i * N_AXES + 8]
+        m2 = mxv * mxv + myv * myv + mzv * mzv
+        mag_mag_sum += math.sqrt(m2)
+        mag_mag_sq += m2
+
+    mag_mag_mean = mag_mag_sum / WINDOW_SIZE
+    mag_mag_var = (mag_mag_sq / WINDOW_SIZE) - (mag_mag_mean * mag_mag_mean)
+    if mag_mag_var < 0:
+        mag_mag_var = 0.0
+
+    feats[49] = mag_mag_mean
+    feats[50] = math.sqrt(mag_mag_var)
+
     return feats
 
+
+# ===== 随机森林推理 =====
 def rf_predict(feats, trees, sm, ss, nc):
     fs = array('f', [0.0] * N_FEATURES)
     for i in range(N_FEATURES):
@@ -193,13 +312,14 @@ def rf_predict(feats, trees, sm, ss, nc):
     for c in range(1, nc):
         if votes[c] > votes[w]:
             w = c
-    return w, votes[w]
+    return w, votes[w], votes  # 返回完整投票分布
 
-# ===== 网页 (优化版仪表盘) =====
+
+# ===== 网页 (优化版仪表盘 v3) =====
 HTML = """<!DOCTYPE html>
 <html lang="zh-CN"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no">
-<title>ESP32 HAR</title>
+<title>ESP32 HAR v3</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,sans-serif;background:#0a0a1e;color:#e0e0e0;min-height:100vh;padding:10px}
@@ -232,8 +352,8 @@ h1{text-align:center;font-size:1.3em;padding:15px 0 5px;background:linear-gradie
 .ft .d{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:5px;background:#00ff88;box-shadow:0 0 6px #00ff88}
 </style></head><body>
 
-<h1>⚡ ESP32 HAR 实时检测</h1>
-<div class="sub">MPU6050 · RF 15trees · 6类活动</div>
+<h1>⚡ ESP32 HAR 实时检测 v3</h1>
+<div class="sub">MPU6050 + HMC5883L · RF 15trees · 6类活动 · 51维</div>
 
 <div class="main" id="main">
   <div class="emoji" id="em">⏳</div>
@@ -250,7 +370,7 @@ h1{text-align:center;font-size:1.3em;padding:15px 0 5px;background:linear-gradie
   <div class="hist-dots" id="hist"></div>
 </div>
 
-<div class="ft"><span class="d"></span> ESP32 已连接 | 模型: RF 15trees</div>
+<div class="ft"><span class="d"></span> ESP32 已连接 | 模型: RF 15trees 51dim</div>
 
 <script>
 var TOTAL=15;
@@ -308,11 +428,13 @@ function poll(){
 setInterval(poll,400);poll();
 </script></body></html>"""
 
+
 # ===== 推理数据 (共享) =====
 current_action = "--"
 current_votes = 0
 current_pred = -1
 inference_ready = False
+
 
 def inference_loop():
     global current_action, current_votes, current_pred, inference_ready
@@ -345,7 +467,7 @@ def inference_loop():
 
     calibrate(50)
 
-    BUF_SZ = WINDOW_SIZE * N_AXES
+    BUF_SZ = WINDOW_SIZE * N_AXES  # 128 × 9 = 1152
     buf = array('f', [0.0] * BUF_SZ)
     pos = 0
     sq = array('b', [0] * SMOOTH_FRAMES)
@@ -375,10 +497,11 @@ def inference_loop():
 
         feats = extract_features(buf)
         try:
-            pred, votes = rf_predict(feats, trees, sm, ss, nc)
+            pred, votes, all_votes = rf_predict(feats, trees, sm, ss, nc)
         except:
             pred = -1
             votes = 0
+            all_votes = [0] * nc
 
         sq[sqp] = pred
         sqp = (sqp + 1) % SMOOTH_FRAMES
@@ -405,8 +528,8 @@ def inference_loop():
 def main():
     global current_action, current_votes
 
-    print("ESP32-S3 HAR - WiFi Mode")
-    print("========================")
+    print("ESP32-S3 HAR - WiFi Mode v3 (51-dim)")
+    print("=====================================")
 
     set_led(255, 100, 0)
 
@@ -419,14 +542,23 @@ def main():
             time.sleep(1)
     print("MPU6050 OK")
 
-    # 2. WiFi AP模式 - ESP32自建热点
+    # 2. HMC5883L
+    print("Init HMC5883L...")
+    init_mag()
+
+    # 3. WiFi AP模式 — 稳健初始化
     print("Starting WiFi AP...")
     gc.collect()
+
+    # 确保 STA 模式关闭 (避免冲突)
+    sta = network.WLAN(network.STA_IF)
+    sta.active(False)
+    time.sleep(0.3)
 
     ap = network.WLAN(network.AP_IF)
     ap.active(True)
     time.sleep(0.5)
-    ap.config(essid='ESP32-HAR', security=0, channel=6)
+    ap.config(essid='ESP32-HAR', security=0, channel=1)  # 信道1更稳定
     try:
         ap.config(txpower=20.5)
     except:
@@ -438,17 +570,16 @@ def main():
         print(f"WiFi AP OK: {web_ip}")
         set_led(0, 255, 0)
     else:
-        web_ip = ""
+        web_ip = "0.0.0.0"
         for _ in range(5):
             set_led(255, 0, 0)
             time.sleep(0.2)
             set_led(0, 0, 0)
             time.sleep(0.2)
         print("WiFi AP FAILED!")
-        while True:
-            time.sleep(1)
+        # 不阻塞，继续尝试
 
-    # 3. 启动推理线程
+    # 4. 启动推理线程
     print("Starting inference...")
     import _thread
     _thread.start_new_thread(inference_loop, ())
@@ -462,7 +593,7 @@ def main():
         while True:
             time.sleep(1)
 
-    # 4. Web服务器
+    # 5. Web服务器
     print("Starting web server...")
     gc.collect()
 
@@ -477,6 +608,7 @@ def main():
     print(f"  WiFi: ESP32-HAR (无密码)")
     print(f"  网页: http://{web_ip}")
     print(f"  LED:  当前动作颜色指示")
+    print(f"  传感器: MPU6050 + HMC5883L | 51维")
     print(f"{'='*40}\n")
 
     while True:
@@ -496,6 +628,7 @@ def main():
                     current_votes,
                     current_pred
                 )
+                # 简化版WiFi API 不含 all_votes (节省带宽)
                 cl.send('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n')
                 cl.send(resp)
             else:

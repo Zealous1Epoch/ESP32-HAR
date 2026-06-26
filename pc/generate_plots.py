@@ -21,11 +21,11 @@ import joblib
 import json
 
 # ===== 配置 =====
-DATA_DIR = "./dataset"
+DATA_DIR = "../data/dataset"
 WINDOW_SIZE = 128
 STEP = 64
 RANDOM_SEED = 42
-OUT_DIR = "./plots"
+OUT_DIR = "../plots"
 
 LABEL_MAP = {
     "sit": 0, "stand": 1, "walk": 2,

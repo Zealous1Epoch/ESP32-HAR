@@ -127,8 +127,9 @@ def main():
     print()
     print("下一步:")
     print("  1. 用 mpremote 把ESP32上的CSV下载到 dataset/")
-    print("  2. python3 train_v2.py  重新训练")
-    print("  3. 上传新模型到ESP32")
+    print("  2. python3 train_v2.py  重新训练 (51维)")
+    print("  3. 上传 rf_params.json 到ESP32")
+    print("  4. 上传 main_serial.py 或 main_wifi.py (51维推理)")
 
 
 if __name__ == "__main__":

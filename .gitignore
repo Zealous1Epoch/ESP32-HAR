@@ -1,15 +1,41 @@
+# Python
 __pycache__/
 *.pyc
+
+# macOS
 .DS_Store
-*.pkl
-dataset/
-dataset_uci/
-plots/
+
+# 模型文件（体积大，由 train_v2.py 生成）
+models/*.pkl
+models/*.json
+!models/.gitkeep
+
+# 数据集（体积大，不上传）
+data/
+
+# 生成图表
+plots/*.png
+
+# 压缩包
 *.zip
+
+# 临时文件
 /tmp/
+
+# 敏感信息
 sk-*.txt
+docs/sk-*.txt
+
+# MicroPython 配置
 portable.ini
-debug_test.py
-wifi_only.py
-wifi_test.py
-download_uci_har.py
+
+# ESP32 调试/测试脚本（非核心）
+esp32/debug_test.py
+esp32/wifi_only.py
+esp32/wifi_test.py
+
+# 原始训练脚本（已被 train_v2.py 取代）
+pc/train.py
+
+# 下载脚本（一次性使用）
+pc/download_uci_har.py

@@ -6,7 +6,7 @@ import json
 import joblib
 
 # 数据和模型路径
-DATA_DIR = "./dataset"
+DATA_DIR = "../data/dataset"
 WINDOW_SIZE = 128
 STEP = 64
 
@@ -73,10 +73,10 @@ def rf_predict_mpy(features, trees, scaler_mean, scaler_scale, n_classes):
 
 def main():
     # 1. 加载模型
-    rf = joblib.load("rf_model.pkl")
-    scaler = joblib.load("scaler.pkl")
+    rf = joblib.load("../models/rf_model.pkl")
+    scaler = joblib.load("../models/scaler.pkl")
 
-    with open("rf_params.json", "r") as f:
+    with open("../models/rf_params.json", "r") as f:
         params = json.load(f)
 
     trees = params["trees"]
