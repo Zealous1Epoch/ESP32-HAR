@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.pkl
+dataset/
+dataset_uci/
+plots/
+*.zip
+/tmp/
+sk-*.txt
+portable.ini
+debug_test.py
+wifi_only.py
+wifi_test.py
+download_uci_har.py
